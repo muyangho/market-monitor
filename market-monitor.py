@@ -63,8 +63,7 @@ def fetch_yf_industry(ticker):
 
 def get_detailed_sectors_dict(tickers):
     sectors_dict = {}
-    # 모바일 등에서의 API 차단/오류 방지를 위해 max_workers를 5로 낮춤
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=20) as executor:
         for t, s in executor.map(fetch_yf_industry, tickers):
             if s: sectors_dict[t] = s
     return sectors_dict
@@ -73,7 +72,7 @@ def get_detailed_sectors_dict(tickers):
 def translate_sector(text):
     if pd.isna(text) or not str(text).strip(): return "일반 산업"
     text_str = str(text)
-
+    
     if re.search('[가-힣]', text_str):
         if "반도체" in text_str: return "반도체 및 관련장비"
         if "소프트웨어" in text_str: return "소프트웨어 및 IT"
@@ -83,10 +82,10 @@ def translate_sector(text):
         if "화학" in text_str: return "화학 및 소재"
         if "전자" in text_str: return "소비자 가전 및 부품"
         if "통신" in text_str: return "통신 서비스"
-        return text_str
-
+        return text_str 
+        
     eng_lower = text_str.lower()
-
+    
     if "semiconductor equipment" in eng_lower: return "반도체 장비/소재"
     if "semiconductor" in eng_lower: return "반도체 설계/제조"
     if "software - infrastructure" in eng_lower or "systems software" in eng_lower: return "시스템 소프트웨어"
@@ -121,7 +120,7 @@ def translate_sector(text):
     if "utilities" in eng_lower: return "유틸리티(전력/가스)"
     if "machinery" in eng_lower or "industrial" in eng_lower: return "산업 기계 및 인프라"
     if "steel" in eng_lower or "metal" in eng_lower: return "철강 및 금속"
-
+    
     return "기타 통합 산업"
 
 # --- 4. 동적 구성 종목 추출 및 섹터 병합 ---
@@ -135,7 +134,7 @@ def get_index_components(index_name):
             df['Symbol'] = df['Symbol'].str.replace('.', '-', regex=False)
             df['Sector'] = df['GICS Sub-Industry'].apply(translate_sector)
             return df[['Symbol', 'Security', 'Sector']]
-
+            
         elif index_name == "NASDAQ 100":
             url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -145,13 +144,13 @@ def get_index_components(index_name):
                     sym_col = 'Ticker' if 'Ticker' in df.columns else 'Symbol'
                     df = df.rename(columns={sym_col: 'Symbol', 'Company': 'Security'})
                     yf_sectors = get_detailed_sectors_dict(df['Symbol'].tolist())
-
+                    
                     def map_nasdaq_sector(row):
                         yf_sec = yf_sectors.get(row['Symbol'], '')
                         if yf_sec: return translate_sector(yf_sec)
                         wiki_sec = row.get('GICS Sub-Industry', row.get('GICS Sector', 'Technology'))
                         return translate_sector(wiki_sec)
-
+                        
                     df['Sector'] = df.apply(map_nasdaq_sector, axis=1)
                     return df[['Symbol', 'Security', 'Sector']]
 
@@ -166,7 +165,7 @@ def get_index_components(index_name):
                     yf_sectors = get_detailed_sectors_dict(df['Symbol'].tolist())
                     df['Sector'] = df['Symbol'].apply(lambda x: translate_sector(yf_sectors.get(x, '다우 30 산업')))
                     return df[['Symbol', 'Security', 'Sector']]
-
+                    
         elif index_name == "PHLX Semiconductor (SOX)":
             sox_data = [
                 ("AMD", "Advanced Micro Devices", "반도체 설계/제조"), ("ADI", "Analog Devices", "반도체 설계/제조"),
@@ -189,30 +188,30 @@ def get_index_components(index_name):
         elif "KOSPI" in index_name or "KOSDAQ" in index_name:
             market = 'KOSPI' if "KOSPI" in index_name else 'KOSDAQ'
             suffix = '.KS' if market == 'KOSPI' else '.KQ'
-
+            
             df_krx = fdr.StockListing(market)
             if 'Marcap' in df_krx.columns:
                 top_n = df_krx.sort_values(by='Marcap', ascending=False).head(100)
             else:
                 top_n = df_krx.head(100)
-
+                
             top_n['Symbol'] = top_n['Code'] + suffix
             name_col = 'Name' if 'Name' in top_n.columns else 'Security'
             top_n = top_n.rename(columns={name_col: 'Security'})
-
+            
             yf_sectors = get_detailed_sectors_dict(top_n['Symbol'].tolist())
-
+            
             def map_krx_sector(row):
                 yf_sec = yf_sectors.get(row['Symbol'], '')
                 if yf_sec: return translate_sector(yf_sec)
                 return translate_sector(row.get('Sector', '기타 일반 산업'))
-
+                
             top_n['Sector'] = top_n.apply(map_krx_sector, axis=1)
             return top_n[['Symbol', 'Security', 'Sector']]
-
+            
     except Exception as e:
         st.error(f"데이터 스크래핑 에러 발생: {e}")
-        return pd.DataFrame()
+    return pd.DataFrame()
 
 # --- 5. 주가 데이터 다운로드 ---
 @st.cache_data(ttl=60)
@@ -221,7 +220,7 @@ def get_market_data(tickers):
     if data.empty: return None
     data = data.dropna(axis=1, how='all').ffill()
     if len(data) < 2: return None
-
+    
     current = data.iloc[-1]
     prev = data.iloc[-2]
     pct_change = ((current - prev) / prev) * 100
@@ -250,7 +249,7 @@ st.subheader("📌 기준 지표 (Index vs Futures)")
 with st.spinner(f"실시간 매크로 지표 호출 중..."):
     # 레이아웃을 2개의 컬럼으로 나눔 (본지수 | 선물지수)
     m_col1, m_col2 = st.columns(2)
-
+    
     # 1. 본지수 (Index) 렌더링
     idx_data = get_metric_data(idx_info["index_ticker"])
     if idx_data:
@@ -276,46 +275,46 @@ st.divider()
 # ==========================================
 with st.spinner(f'종목 데이터 및 세부 산업군(Industry)을 뜯어보는 중입니다...'):
     components_df = get_index_components(menu)
-
+    
     if not components_df.empty:
         tickers = components_df['Symbol'].tolist()
         change_df = get_market_data(tickers)
-
+        
         if change_df is not None:
             merged_df = pd.merge(components_df, change_df, on='Symbol')
             merged_df['등락률(%)'] = merged_df['등락률(%)'].round(2)
             merged_df = merged_df.sort_values(by='등락률(%)', ascending=False).dropna()
-
+            
             merged_df['차트 링크'] = merged_df['Symbol'].apply(
                 lambda x: f"https://finance.naver.com/item/main.naver?code={x.replace('.KS', '').replace('.KQ', '')}" if '.KS' in x or '.KQ' in x else f"https://finance.yahoo.com/quote/{x}"
             )
-
+            
             display_df = merged_df[['Symbol', 'Security', 'Sector', '등락률(%)', '차트 링크']]
             display_df.columns = ['티커', '종목명', '섹터(테마)', '등락률(%)', '차트 링크']
-
+            
             st.subheader("전체 시장 참여도 (Market Breadth)")
             pos = (display_df['등락률(%)'] > 0).sum()
             neg = (display_df['등락률(%)'] < 0).sum()
             flat = len(display_df) - pos - neg
-
+            
             c1, c2, c3 = st.columns(3)
             c1.metric("상승 종목 📈", f"{pos}개")
             c2.metric("하락 종목 📉", f"{neg}개")
             c3.metric("보합", f"{flat}개")
             st.divider()
-
+            
             col1, col2 = st.columns([1, 1])
             with col1:
                 st.subheader("1. 🎯 테마별 자금 쏠림 (평균 등락률)")
                 sector_avg = display_df.groupby('섹터(테마)')['등락률(%)'].mean().sort_values(ascending=False).round(2)
                 st.dataframe(sector_avg.reset_index().style.map(style_pct, subset=['등락률(%)']), use_container_width=True)
-
+            
             with col2:
                 st.subheader("2. 🔥 멱살 주도주 (TOP 5)")
                 st.dataframe(display_df[['티커', '종목명', '등락률(%)']].head(5).style.map(style_pct, subset=['등락률(%)']), use_container_width=True, hide_index=True)
                 st.subheader("3. 🧊 하락 원흉 (BOTTOM 5)")
                 st.dataframe(display_df[['티커', '종목명', '등락률(%)']].tail(5).sort_values(by='등락률(%)').style.map(style_pct, subset=['등락률(%)']), use_container_width=True, hide_index=True)
-
+            
             st.divider()
             st.subheader(f"🔎 전체 구성 종목 ({len(display_df)}개)")
             st.dataframe(
