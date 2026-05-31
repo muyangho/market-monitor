@@ -63,7 +63,7 @@ def fetch_yf_industry(ticker):
 
 def get_detailed_sectors_dict(tickers):
     sectors_dict = {}
-    # 모바일 등에서의 API 차단/오류 방지를 위해 max_workers를 20에서 5로 하향
+    # 모바일 등에서의 API 차단/오류 방지를 위해 max_workers를 5로 낮춤
     with ThreadPoolExecutor(max_workers=5) as executor:
         for t, s in executor.map(fetch_yf_industry, tickers):
             if s: sectors_dict[t] = s
