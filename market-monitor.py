@@ -39,21 +39,22 @@ INDEX_MAP = {
     }
 }
 
-# --- 단일 지표 호출 함수 ---
+# --- 단일 지표 호출 함수 (서버 환경 안정화) ---
 def get_metric_data(ticker):
     if not ticker: return None
     try:
-        data = yf.download(ticker, period="5d", progress=False)['Close']
-        if len(data) >= 2:
-            current = float(data.iloc[-1])
-            prev = float(data.iloc[-2])
+        # yf.download 대신 history를 사용하여 단일 종목 호출의 안정성 극대화
+        hist = yf.Ticker(ticker).history(period="5d")
+        if not hist.empty and len(hist) >= 2:
+            current = float(hist['Close'].iloc[-1])
+            prev = float(hist['Close'].iloc[-2])
             change = ((current - prev) / prev) * 100
             return current, change
-    except:
-        pass
+    except Exception as e:
+        print(f"[{ticker}] 매크로 지표 호출 오류: {e}")
     return None
 
-# --- 2. yfinance 병렬(Multi-threading) 세부 섹터 수집 ---
+# --- 2. yfinance 병렬 세부 섹터 수집 ---
 def fetch_yf_industry(ticker):
     try:
         info = yf.Ticker(ticker).info
@@ -63,7 +64,8 @@ def fetch_yf_industry(ticker):
 
 def get_detailed_sectors_dict(tickers):
     sectors_dict = {}
-    with ThreadPoolExecutor(max_workers=20) as executor:
+    # 서버 환경(특히 Streamlit Cloud)에서 yfinance IP 차단을 막기 위해 max_workers를 5로 하향
+    with ThreadPoolExecutor(max_workers=5) as executor:
         for t, s in executor.map(fetch_yf_industry, tickers):
             if s: sectors_dict[t] = s
     return sectors_dict
@@ -126,10 +128,13 @@ def translate_sector(text):
 # --- 4. 동적 구성 종목 추출 및 섹터 병합 ---
 @st.cache_data(ttl=86400)
 def get_index_components(index_name):
+    # 클라우드 환경 차단 방지용 강력한 User-Agent
+    req_headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+    
     try:
         if index_name == "S&P 500":
             url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            req = urllib.request.Request(url, headers=req_headers)
             df = pd.read_html(urllib.request.urlopen(req).read())[0]
             df['Symbol'] = df['Symbol'].str.replace('.', '-', regex=False)
             df['Sector'] = df['GICS Sub-Industry'].apply(translate_sector)
@@ -137,7 +142,7 @@ def get_index_components(index_name):
             
         elif index_name == "NASDAQ 100":
             url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            req = urllib.request.Request(url, headers=req_headers)
             dfs = pd.read_html(urllib.request.urlopen(req).read())
             for df in dfs:
                 if 'Ticker' in df.columns or 'Symbol' in df.columns:
@@ -156,7 +161,7 @@ def get_index_components(index_name):
 
         elif index_name == "DOW 30":
             url = 'https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average'
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            req = urllib.request.Request(url, headers=req_headers)
             dfs = pd.read_html(urllib.request.urlopen(req).read())
             for df in dfs:
                 if 'Symbol' in df.columns:
@@ -210,23 +215,33 @@ def get_index_components(index_name):
             return top_n[['Symbol', 'Security', 'Sector']]
             
     except Exception as e:
-        st.error(f"데이터 스크래핑 에러 발생: {e}")
+        print(f"데이터 스크래핑 에러 발생: {e}")
     return pd.DataFrame()
 
-# --- 5. 주가 데이터 다운로드 ---
+# --- 5. 주가 데이터 다운로드 (에러 방어 로직 강화) ---
 @st.cache_data(ttl=60)
 def get_market_data(tickers):
-    data = yf.download(tickers, period="5d", progress=False)['Close']
-    if data.empty: return None
-    data = data.dropna(axis=1, how='all').ffill()
-    if len(data) < 2: return None
-    
-    current = data.iloc[-1]
-    prev = data.iloc[-2]
-    pct_change = ((current - prev) / prev) * 100
-    change_df = pct_change.reset_index()
-    change_df.columns = ['Symbol', '등락률(%)']
-    return change_df
+    if not tickers: return None
+    try:
+        data = yf.download(tickers, period="5d", progress=False)['Close']
+        if data.empty: return None
+        
+        # Series(단일 종목) 반환 방어
+        if isinstance(data, pd.Series):
+            data = data.to_frame()
+            
+        data = data.dropna(axis=1, how='all').ffill()
+        if len(data) < 2: return None
+        
+        current = data.iloc[-1]
+        prev = data.iloc[-2]
+        pct_change = ((current - prev) / prev) * 100
+        change_df = pct_change.reset_index()
+        change_df.columns = ['Symbol', '등락률(%)']
+        return change_df
+    except Exception as e:
+        print(f"주가 데이터 다운로드 에러: {e}")
+        return None
 
 def style_pct(val):
     if pd.isna(val): return ''
@@ -241,23 +256,22 @@ menu = st.sidebar.radio("시장 분석 지수 선택", list(INDEX_MAP.keys()))
 st.title(f"📊 {menu} 심층 분석")
 
 # ==========================================
-# [상단] 매크로 선행 지표 (본지수 & 선물지수 분리 배치)
+# [상단] 매크로 선행 지표
 # ==========================================
 idx_info = INDEX_MAP[menu]
 
 st.subheader("📌 기준 지표 (Index vs Futures)")
 with st.spinner(f"실시간 매크로 지표 호출 중..."):
-    # 레이아웃을 2개의 컬럼으로 나눔 (본지수 | 선물지수)
     m_col1, m_col2 = st.columns(2)
     
-    # 1. 본지수 (Index) 렌더링
+    # 1. 본지수 렌더링
     idx_data = get_metric_data(idx_info["index_ticker"])
     if idx_data:
         m_col1.metric(label=f"📉 {idx_info['index_name']}", value=f"{idx_data[0]:,.2f}", delta=f"{idx_data[1]:.2f}%")
     else:
         m_col1.error(f"{idx_info['index_name']} 데이터를 불러오지 못했습니다.")
 
-    # 2. 선물지수 (Futures) 렌더링
+    # 2. 선물지수 렌더링
     if idx_info["future_ticker"]:
         fut_data = get_metric_data(idx_info["future_ticker"])
         if fut_data:
@@ -265,15 +279,14 @@ with st.spinner(f"실시간 매크로 지표 호출 중..."):
         else:
             m_col2.error(f"{idx_info['future_name']} 데이터를 불러오지 못했습니다.")
     else:
-        # 선물이 없는 지수(코스피 등)의 경우 빈 공간 처리 또는 안내 문구
-        m_col2.info("💡 무료 API 정책상 해당 지수의 실시간 선물 데이터는 제공되지 않습니다.")
+        m_col2.info("💡 API 정책상 해당 지수의 실시간 선물 데이터는 제공되지 않습니다.")
 
 st.divider()
 
 # ==========================================
 # [하단] 종목 딥섹터 분석 및 차트 연동
 # ==========================================
-with st.spinner(f'종목 데이터 및 세부 산업군(Industry)을 뜯어보는 중입니다...'):
+with st.spinner(f'종목 데이터 및 세부 산업군을 분석 중입니다...'):
     components_df = get_index_components(menu)
     
     if not components_df.empty:
@@ -326,6 +339,6 @@ with st.spinner(f'종목 데이터 및 세부 산업군(Industry)을 뜯어보�
                 hide_index=True
             )
         else:
-            st.error("데이터 통신 중 주가 기록을 불러오지 못했습니다.")
+            st.error("데이터 통신 중 주가 기록을 불러오지 못했습니다. (yfinance API 응답 지연)")
     else:
         st.error("스크래핑 에러가 발생했습니다. 잠시 후 다시 시도해주세요.")
