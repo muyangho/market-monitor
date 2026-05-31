@@ -1,7 +1,0 @@
-streamlit
-yfinance
-pandas
-FinanceDataReader
-lxml
-html5lib
-beautifulsoup4
