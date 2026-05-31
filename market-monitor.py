@@ -178,4 +178,155 @@ def get_index_components(index_name):
                 ("MRVL", "Marvell Technology", "반도체 설계/제조"), ("MCHP", "Microchip Technology", "반도체 설계/제조"),
                 ("MU", "Micron Technology", "메모리 반도체"), ("MPWR", "Monolithic Power Systems", "반도체 설계/제조"),
                 ("NVDA", "Nvidia", "반도체 설계/제조"), ("NXPI", "NXP Semiconductors", "반도체 설계/제조"),
-                ("ON", "ON Semiconductor",
+                ("ON", "ON Semiconductor", "반도체 설계/제조"), ("QCOM", "Qualcomm", "반도체 설계/제조"),
+                ("RMBS", "Rambus", "반도체 설계/제조"), ("SWKS", "Skyworks Solutions", "반도체 설계/제조"),
+                ("STM", "STMicroelectronics", "반도체 설계/제조"), ("TXN", "Texas Instruments", "반도체 설계/제조"),
+                ("TER", "Teradyne", "반도체 장비/소재"), ("WDC", "Western Digital", "메모리 반도체"),
+                ("WOLF", "Wolfspeed", "반도체 장비/소재")
+            ]
+            return pd.DataFrame(sox_data, columns=['Symbol', 'Security', 'Sector'])
+
+        elif "KOSPI" in index_name or "KOSDAQ" in index_name:
+            market = 'KOSPI' if "KOSPI" in index_name else 'KOSDAQ'
+            suffix = '.KS' if market == 'KOSPI' else '.KQ'
+
+            df_krx = fdr.StockListing(market)
+            if 'Marcap' in df_krx.columns:
+                top_n = df_krx.sort_values(by='Marcap', ascending=False).head(100)
+            else:
+                top_n = df_krx.head(100)
+
+            top_n['Symbol'] = top_n['Code'] + suffix
+            name_col = 'Name' if 'Name' in top_n.columns else 'Security'
+            top_n = top_n.rename(columns={name_col: 'Security'})
+
+            yf_sectors = get_detailed_sectors_dict(top_n['Symbol'].tolist())
+
+            def map_krx_sector(row):
+                yf_sec = yf_sectors.get(row['Symbol'], '')
+                if yf_sec: return translate_sector(yf_sec)
+                return translate_sector(row.get('Sector', '기타 일반 산업'))
+
+            top_n['Sector'] = top_n.apply(map_krx_sector, axis=1)
+            return top_n[['Symbol', 'Security', 'Sector']]
+
+    except Exception as e:
+        st.error(f"데이터 스크래핑 에러 발생: {e}")
+        return pd.DataFrame()
+
+# --- 5. 주가 데이터 다운로드 ---
+@st.cache_data(ttl=60)
+def get_market_data(tickers):
+    data = yf.download(tickers, period="5d", progress=False)['Close']
+    if data.empty: return None
+    data = data.dropna(axis=1, how='all').ffill()
+    if len(data) < 2: return None
+
+    current = data.iloc[-1]
+    prev = data.iloc[-2]
+    pct_change = ((current - prev) / prev) * 100
+    change_df = pct_change.reset_index()
+    change_df.columns = ['Symbol', '등락률(%)']
+    return change_df
+
+def style_pct(val):
+    if pd.isna(val): return ''
+    if val > 0: return 'color: #ff4b4b; font-weight: bold;'
+    elif val < 0: return 'color: #1f77b4; font-weight: bold;'
+    return 'color: gray;'
+
+# --- 6. 메인 UI 랜더링 ---
+st.sidebar.title("🦅 Master Market Monitor")
+menu = st.sidebar.radio("시장 분석 지수 선택", list(INDEX_MAP.keys()))
+
+st.title(f"📊 {menu} 심층 분석")
+
+# ==========================================
+# [상단] 매크로 선행 지표 (본지수 & 선물지수 분리 배치)
+# ==========================================
+idx_info = INDEX_MAP[menu]
+
+st.subheader("📌 기준 지표 (Index vs Futures)")
+with st.spinner(f"실시간 매크로 지표 호출 중..."):
+    # 레이아웃을 2개의 컬럼으로 나눔 (본지수 | 선물지수)
+    m_col1, m_col2 = st.columns(2)
+
+    # 1. 본지수 (Index) 렌더링
+    idx_data = get_metric_data(idx_info["index_ticker"])
+    if idx_data:
+        m_col1.metric(label=f"📉 {idx_info['index_name']}", value=f"{idx_data[0]:,.2f}", delta=f"{idx_data[1]:.2f}%")
+    else:
+        m_col1.error(f"{idx_info['index_name']} 데이터를 불러오지 못했습니다.")
+
+    # 2. 선물지수 (Futures) 렌더링
+    if idx_info["future_ticker"]:
+        fut_data = get_metric_data(idx_info["future_ticker"])
+        if fut_data:
+            m_col2.metric(label=f"📈 {idx_info['future_name']}", value=f"{fut_data[0]:,.2f}", delta=f"{fut_data[1]:.2f}%")
+        else:
+            m_col2.error(f"{idx_info['future_name']} 데이터를 불러오지 못했습니다.")
+    else:
+        # 선물이 없는 지수(코스피 등)의 경우 빈 공간 처리 또는 안내 문구
+        m_col2.info("💡 무료 API 정책상 해당 지수의 실시간 선물 데이터는 제공되지 않습니다.")
+
+st.divider()
+
+# ==========================================
+# [하단] 종목 딥섹터 분석 및 차트 연동
+# ==========================================
+with st.spinner(f'종목 데이터 및 세부 산업군(Industry)을 뜯어보는 중입니다...'):
+    components_df = get_index_components(menu)
+
+    if not components_df.empty:
+        tickers = components_df['Symbol'].tolist()
+        change_df = get_market_data(tickers)
+
+        if change_df is not None:
+            merged_df = pd.merge(components_df, change_df, on='Symbol')
+            merged_df['등락률(%)'] = merged_df['등락률(%)'].round(2)
+            merged_df = merged_df.sort_values(by='등락률(%)', ascending=False).dropna()
+
+            merged_df['차트 링크'] = merged_df['Symbol'].apply(
+                lambda x: f"https://finance.naver.com/item/main.naver?code={x.replace('.KS', '').replace('.KQ', '')}" if '.KS' in x or '.KQ' in x else f"https://finance.yahoo.com/quote/{x}"
+            )
+
+            display_df = merged_df[['Symbol', 'Security', 'Sector', '등락률(%)', '차트 링크']]
+            display_df.columns = ['티커', '종목명', '섹터(테마)', '등락률(%)', '차트 링크']
+
+            st.subheader("전체 시장 참여도 (Market Breadth)")
+            pos = (display_df['등락률(%)'] > 0).sum()
+            neg = (display_df['등락률(%)'] < 0).sum()
+            flat = len(display_df) - pos - neg
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("상승 종목 📈", f"{pos}개")
+            c2.metric("하락 종목 📉", f"{neg}개")
+            c3.metric("보합", f"{flat}개")
+            st.divider()
+
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                st.subheader("1. 🎯 테마별 자금 쏠림 (평균 등락률)")
+                sector_avg = display_df.groupby('섹터(테마)')['등락률(%)'].mean().sort_values(ascending=False).round(2)
+                st.dataframe(sector_avg.reset_index().style.map(style_pct, subset=['등락률(%)']), use_container_width=True)
+
+            with col2:
+                st.subheader("2. 🔥 멱살 주도주 (TOP 5)")
+                st.dataframe(display_df[['티커', '종목명', '등락률(%)']].head(5).style.map(style_pct, subset=['등락률(%)']), use_container_width=True, hide_index=True)
+                st.subheader("3. 🧊 하락 원흉 (BOTTOM 5)")
+                st.dataframe(display_df[['티커', '종목명', '등락률(%)']].tail(5).sort_values(by='등락률(%)').style.map(style_pct, subset=['등락률(%)']), use_container_width=True, hide_index=True)
+
+            st.divider()
+            st.subheader(f"🔎 전체 구성 종목 ({len(display_df)}개)")
+            st.dataframe(
+                display_df.style.map(style_pct, subset=['등락률(%)']),
+                column_config={
+                    "차트 링크": st.column_config.LinkColumn("상세 차트", display_text="📈 차트 열기")
+                },
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.error("데이터 통신 중 주가 기록을 불러오지 못했습니다.")
+    else:
+        st.error("스크래핑 에러가 발생했습니다. 잠시 후 다시 시도해주세요.")
